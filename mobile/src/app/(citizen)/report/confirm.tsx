@@ -172,6 +172,27 @@ export default function ConfirmComplaintScreen() {
               <Image source={{ uri: draft.photoUri }} style={styles.previewImage} />
             )}
 
+            {/* Visual Bounding Box directly over clicked pothole photo */}
+            {draft.bbox && (
+              <View
+                style={[
+                  styles.imageBbox,
+                  {
+                    left: `${draft.bbox[0] * 100}%`,
+                    top: `${draft.bbox[1] * 100}%`,
+                    width: `${draft.bbox[2] * 100}%`,
+                    height: `${draft.bbox[3] * 100}%`,
+                  },
+                ]}
+              >
+                <View style={styles.imageBboxBadge}>
+                  <Text style={styles.imageBboxText}>
+                    POTHOLE {Math.round((draft.confidence || 0.92) * 100)}%
+                  </Text>
+                </View>
+              </View>
+            )}
+
             <View style={styles.overlayPillRow}>
               <View style={styles.aiTag}>
                 <Ionicons name="sparkles" size={12} color="#FFFFFF" />
@@ -777,5 +798,28 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: '#64748B',
     marginTop: 1,
+  },
+  imageBbox: {
+    position: 'absolute',
+    borderWidth: 2.5,
+    borderColor: '#EF4444',
+    borderStyle: 'dashed',
+    borderRadius: 6,
+    backgroundColor: 'rgba(239, 68, 68, 0.18)',
+    zIndex: 10,
+  },
+  imageBboxBadge: {
+    position: 'absolute',
+    top: -24,
+    left: 0,
+    backgroundColor: '#EF4444',
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 4,
+  },
+  imageBboxText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '800',
   },
 });

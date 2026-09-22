@@ -50,6 +50,13 @@ export default function CameraScreen() {
   const [inferenceMs, setInferenceMs] = useState<number>(210);
   const [isCapturing, setIsCapturing] = useState(false);
 
+  // Auto request camera permission on mount
+  useEffect(() => {
+    if (permission && !permission.granted) {
+      requestPermission();
+    }
+  }, [permission]);
+
   // Periodic frame sampling loop (TRD §3.4: ~700ms–1s interval)
   useEffect(() => {
     let timer: ReturnType<typeof setInterval> | null = null;

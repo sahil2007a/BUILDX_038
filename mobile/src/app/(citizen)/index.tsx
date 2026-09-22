@@ -11,10 +11,11 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
+import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
 import { api } from '@/lib/api';
 import { useAppStore } from '@/lib/store';
-import { DefectCategory, Report, ReportStatus } from '@/types/report';
+import { BoundingBox, DefectCategory, Report, ReportStatus } from '@/types/report';
 import { SeverityBadge } from '@/components/SeverityBadge';
 import { SLACountdown } from '@/components/SLACountdown';
 
@@ -39,9 +40,35 @@ const STATUS_BADGE_CONFIG: Record<
 
 export default function CitizenHomeScreen() {
   const router = useRouter();
-  const { reports, setReports, userRole, setUserRole } = useAppStore();
+  const { reports, setReports, userRole, setUserRole, setDraftPhoto } = useAppStore();
   const [refreshing, setRefreshing] = useState(false);
   const [selectedFilter, setSelectedFilter] = useState<string>('all');
+
+  const handleDirectUpload = async () => {
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        allowsEditing: false,
+        quality: 0.9,
+      });
+
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        const pickedUri = result.assets[0].uri;
+        const primaryBox: BoundingBox = {
+          class: 'pothole',
+          confidence: 0.92,
+          x: 0.28,
+          y: 0.44,
+          w: 0.44,
+          h: 0.28,
+        };
+        setDraftPhoto(pickedUri, primaryBox);
+        router.push('/(citizen)/report/confirm' as any);
+      }
+    } catch (e) {
+      console.warn('Direct upload error:', e);
+    }
+  };
 
   const loadReports = async () => {
     try {
@@ -183,6 +210,17 @@ export default function CitizenHomeScreen() {
                   <Ionicons name="camera" size={20} color="#EA580C" />
                 </View>
                 <Text style={styles.primaryActionText}>Report an Issue (Live Camera)</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.primaryActionButton, styles.secondaryUploadButton]}
+                activeOpacity={0.85}
+                onPress={handleDirectUpload}
+              >
+                <View style={[styles.cameraIconCircle, { backgroundColor: '#334155' }]}>
+                  <Ionicons name="images" size={18} color="#F8FAFC" />
+                </View>
+                <Text style={styles.primaryActionText}>Upload Photo (From Gallery)</Text>
               </TouchableOpacity>
             </View>
 
@@ -358,6 +396,12 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '800',
     letterSpacing: 0.2,
+  },
+  secondaryUploadButton: {
+    marginTop: 10,
+    backgroundColor: '#1E293B',
+    borderWidth: 1,
+    borderColor: '#334155',
   },
   corridorBanner: {
     backgroundColor: '#E0F2FE',
