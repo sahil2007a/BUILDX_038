@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
+  ActivityIndicator,
   FlatList,
   Image,
   RefreshControl,
@@ -15,87 +16,106 @@ import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
 import { api } from '@/lib/api';
 import { useAppStore } from '@/lib/store';
-import { BoundingBox, DefectCategory, Report, ReportStatus } from '@/types/report';
-import { SeverityBadge } from '@/components/SeverityBadge';
-import { SLACountdown } from '@/components/SLACountdown';
+import { Complaint, ComplaintStats } from '@/types/report';
 
-const CATEGORY_LABELS: Record<DefectCategory, string> = {
-  pothole: 'Pothole',
-  road_crack: 'Road Crack',
-  water_pipeline_damage: 'Water Pipeline',
-  streetlight_fault: 'Streetlight',
-};
-
-const STATUS_BADGE_CONFIG: Record<
-  ReportStatus,
-  { label: string; bg: string; text: string }
-> = {
-  reported: { label: 'Reported', bg: '#EFF6FF', text: '#2563EB' },
-  verified: { label: 'AI Verified', bg: '#F5F3FF', text: '#7C3AED' },
-  assigned: { label: 'Assigned', bg: '#FEF3C7', text: '#D97706' },
-  in_progress: { label: 'In Progress', bg: '#FFEDD5', text: '#EA580C' },
-  pending_review: { label: 'Pending Review', bg: '#FFFBEB', text: '#B45309' },
-  resolved: { label: 'Resolved', bg: '#ECFDF5', text: '#059669' },
+const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string }> = {
+  Submitted: { label: 'Submitted', bg: '#EFF6FF', text: '#2563EB' },
+  'Under Review': { label: 'Under Review', bg: '#F5F3FF', text: '#7C3AED' },
+  Assigned: { label: 'Assigned', bg: '#FEF3C7', text: '#D97706' },
+  'In Progress': { label: 'In Progress', bg: '#FFEDD5', text: '#EA580C' },
+  Resolved: { label: 'Resolved', bg: '#ECFDF5', text: '#059669' },
 };
 
 export default function CitizenHomeScreen() {
   const router = useRouter();
-  const { reports, setReports, userRole, setUserRole, setDraftPhoto } = useAppStore();
+  const { currentUser, setDraftDetections } = useAppStore();
+
+  const [complaints, setComplaints] = useState<Complaint[]>([]);
+  const [stats, setStats] = useState<ComplaintStats>({
+    total: 0,
+    pending: 0,
+    in_progress: 0,
+    resolved: 0,
+    new_complaints: 0,
+  });
+  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [selectedFilter, setSelectedFilter] = useState<string>('all');
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const handleDirectUpload = async () => {
+  const loadDashboardData = async () => {
+    try {
+      setErrorMessage(null);
+      const [complaintsData, statsData] = await Promise.all([
+        api.getComplaints(),
+        api.getComplaintStats(),
+      ]);
+      setComplaints(complaintsData);
+      setStats(statsData);
+    } catch (e: any) {
+      console.warn('Dashboard data fetch error:', e);
+      setErrorMessage('Could not connect to RastaRakshak server.');
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadDashboardData();
+  }, []);
+
+  const onRefresh = () => {
+    setRefreshing(true);
+    loadDashboardData();
+  };
+
+  const handleGalleryUpload = async () => {
     try {
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ['images'],
         allowsEditing: false,
         quality: 0.9,
+        base64: true,
       });
 
       if (!result.canceled && result.assets && result.assets.length > 0) {
-        const pickedUri = result.assets[0].uri;
-        const primaryBox: BoundingBox = {
-          class: 'pothole',
-          confidence: 0.92,
-          x: 0.28,
-          y: 0.44,
-          w: 0.44,
-          h: 0.28,
-        };
-        setDraftPhoto(pickedUri, primaryBox);
+        const pickedAsset = result.assets[0];
+        setLoading(true);
+
+        const detectionResult = await api.detectFullImage({
+          imageBase64: pickedAsset.base64 || undefined,
+          fileUri: pickedAsset.uri,
+        });
+
+        setLoading(false);
+
+        if (!detectionResult.detected || detectionResult.detections.length === 0) {
+          alert('No pothole detected in this image. Please select a clear road damage photo.');
+          return;
+        }
+
+        setDraftDetections(pickedAsset.uri, detectionResult.detections);
         router.push('/(citizen)/report/confirm' as any);
       }
     } catch (e) {
+      setLoading(false);
       console.warn('Direct upload error:', e);
     }
   };
 
-  const loadReports = async () => {
-    try {
-      const data = await api.getReports();
-      setReports(data);
-    } catch (e) {
-      console.warn('Failed to load reports:', e);
-    }
-  };
-
-  useEffect(() => {
-    loadReports();
-  }, []);
-
-  const onRefresh = async () => {
-    setRefreshing(true);
-    await loadReports();
-    setRefreshing(false);
-  };
-
-  const filteredReports = reports.filter((r) => {
+  const filteredComplaints = complaints.filter((c) => {
     if (selectedFilter === 'all') return true;
-    return r.category === selectedFilter;
+    if (selectedFilter === 'pothole') return c.issue_type.toLowerCase().includes('pothole');
+    if (selectedFilter === 'water') return c.department_name.includes('Water');
+    if (selectedFilter === 'streetlight') return c.department_name.includes('Streetlight');
+    return true;
   });
 
-  const renderReportCard = ({ item }: { item: Report }) => {
-    const statusCfg = STATUS_BADGE_CONFIG[item.status] || STATUS_BADGE_CONFIG.reported;
+  const userName = currentUser?.name || 'Sahil';
+
+  const renderComplaintCard = ({ item }: { item: Complaint }) => {
+    const statusCfg = STATUS_CONFIG[item.status] || STATUS_CONFIG.Submitted;
 
     return (
       <TouchableOpacity
@@ -103,7 +123,7 @@ export default function CitizenHomeScreen() {
         activeOpacity={0.85}
         onPress={() => router.push(`/(citizen)/report/${item.id}` as any)}
       >
-        <Image source={{ uri: item.photo_url }} style={styles.cardImage} />
+        <Image source={{ uri: item.image_url }} style={styles.cardImage} />
 
         <View style={styles.cardBody}>
           <View style={styles.cardHeaderRow}>
@@ -112,39 +132,36 @@ export default function CitizenHomeScreen() {
                 {statusCfg.label}
               </Text>
             </View>
-            <SeverityBadge score={item.severity_score} size="sm" />
+
+            <View style={styles.idBadge}>
+              <Text style={styles.idBadgeText}>{item.id}</Text>
+            </View>
           </View>
 
-          <Text style={styles.cardTitle}>
-            {CATEGORY_LABELS[item.category] || item.category}
-          </Text>
+          <Text style={styles.cardTitle}>{item.issue_type}</Text>
+
+          <Text style={styles.cardDept}>{item.department_name}</Text>
 
           <View style={styles.locationRow}>
-            <Ionicons name="location-sharp" size={13} color="#64748B" />
+            <Ionicons name="location-sharp" size={12} color="#64748B" />
             <Text style={styles.cardLocation} numberOfLines={1}>
-              {item.ward || 'Nagpur Zone'}
+              {item.address}
             </Text>
           </View>
 
-          {item.description ? (
-            <Text style={styles.cardDesc} numberOfLines={2}>
-              {item.description}
-            </Text>
-          ) : null}
-
           <View style={styles.cardFooter}>
-            {item.sla_deadline ? (
-              <SLACountdown deadline={item.sla_deadline} compact />
-            ) : null}
-
-            {item.corroborating_count > 1 && (
-              <View style={styles.corroborateBadge}>
-                <Ionicons name="people" size={11} color="#EA580C" />
-                <Text style={styles.corroborateText}>
-                  +{item.corroborating_count} citizens
+            {item.ai_confidence ? (
+              <View style={styles.aiBadge}>
+                <Ionicons name="scan" size={10} color="#16A34A" />
+                <Text style={styles.aiBadgeText}>
+                  AI Conf: {(item.ai_confidence * 100).toFixed(1)}%
                 </Text>
               </View>
-            )}
+            ) : null}
+
+            <View style={styles.severityBadge}>
+              <Text style={styles.severityText}>{item.severity} Risk</Text>
+            </View>
           </View>
         </View>
       </TouchableOpacity>
@@ -158,9 +175,9 @@ export default function CitizenHomeScreen() {
       {/* Top Header */}
       <View style={styles.header}>
         <View>
-          <Text style={styles.brandSubtitle}>NMC CIVIC DEFECT RADAR</Text>
-          <Text style={styles.brandTitle}>
-            Rasta<Text style={{ color: '#EA580C' }}>Rakshak</Text>
+          <Text style={styles.greetingSubtitle}>NAGPUR CIVIC RADAR</Text>
+          <Text style={styles.greetingTitle}>
+            Good Morning, <Text style={{ color: '#EA580C' }}>{userName}</Text>
           </Text>
         </View>
 
@@ -168,37 +185,35 @@ export default function CitizenHomeScreen() {
           style={styles.roleToggle}
           onPress={() => router.push('/auth/login' as any)}
         >
-          <Ionicons name="shield-checkmark" size={16} color="#0F172A" />
+          <Ionicons name="shield-checkmark" size={15} color="#0F172A" />
           <Text style={styles.roleToggleText}>
-            {userRole === 'officer' ? 'Officer Mode' : 'Nagpur'}
+            {currentUser?.role === 'officer' ? 'Officer Mode' : 'Switch Mode'}
           </Text>
         </TouchableOpacity>
       </View>
 
-      {/* Main Content List */}
       <FlatList
-        data={filteredReports}
+        data={filteredComplaints}
         keyExtractor={(item) => item.id}
-        renderItem={renderReportCard}
+        renderItem={renderComplaintCard}
         contentContainerStyle={styles.listContent}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#EA580C" />
         }
         ListHeaderComponent={
           <>
-            {/* Action Hero Card */}
+            {/* Section 44: Action Hero Card */}
             <View style={styles.heroCard}>
               <View style={styles.heroBadgeRow}>
                 <View style={styles.pulseDot} />
-                <Text style={styles.heroBadgeText}>Nagpur AI Infrastructure Sentinel</Text>
+                <Text style={styles.heroBadgeText}>Keep Nagpur safer, one report at a time</Text>
               </View>
 
               <Text style={styles.heroHeadline}>
-                Spot a defect? Report in 60 seconds with live AI bounding.
+                Spot a road problem?
               </Text>
-
               <Text style={styles.heroSub}>
-                Complaints auto-deduplicate and route directly to NMC Roads, OCW Water, or MSEDCL under the 10-day High Court repair mandate.
+                AI will detect potholes with real YOLO bounding boxes and help you report them directly to municipal officers.
               </Text>
 
               <TouchableOpacity
@@ -209,36 +224,58 @@ export default function CitizenHomeScreen() {
                 <View style={styles.cameraIconCircle}>
                   <Ionicons name="camera" size={20} color="#EA580C" />
                 </View>
-                <Text style={styles.primaryActionText}>Report an Issue (Live Camera)</Text>
+                <Text style={styles.primaryActionText}>Report an Issue (Live Camera) →</Text>
               </TouchableOpacity>
 
               <TouchableOpacity
                 style={[styles.primaryActionButton, styles.secondaryUploadButton]}
                 activeOpacity={0.85}
-                onPress={handleDirectUpload}
+                onPress={handleGalleryUpload}
               >
                 <View style={[styles.cameraIconCircle, { backgroundColor: '#334155' }]}>
                   <Ionicons name="images" size={18} color="#F8FAFC" />
                 </View>
-                <Text style={styles.primaryActionText}>Upload Photo (From Gallery)</Text>
+                <Text style={styles.primaryActionText}>Upload Image (From Gallery)</Text>
               </TouchableOpacity>
             </View>
 
-            {/* Monitored Corridors Bar */}
-            <View style={styles.corridorBanner}>
-              <View style={styles.corridorHeader}>
-                <Ionicons name="stats-chart" size={14} color="#0284C7" />
-                <Text style={styles.corridorHeaderText}>
-                  Priority Corridors: Kamptee Rd • Katol Rd • Dharampeth • Manish Nagar
-                </Text>
+            {/* Section 23: Your Reports Counter Summary */}
+            <View style={styles.statsCard}>
+              <Text style={styles.statsHeaderTitle}>Your Nagpur Reports</Text>
+              <View style={styles.statsRow}>
+                <View style={styles.statCol}>
+                  <Text style={styles.statNumber}>{stats.total}</Text>
+                  <Text style={styles.statLabel}>Total</Text>
+                </View>
+                <View style={styles.statDivider} />
+                <View style={styles.statCol}>
+                  <Text style={[styles.statNumber, { color: '#D97706' }]}>{stats.pending}</Text>
+                  <Text style={styles.statLabel}>Pending</Text>
+                </View>
+                <View style={styles.statDivider} />
+                <View style={styles.statCol}>
+                  <Text style={[styles.statNumber, { color: '#059669' }]}>{stats.resolved}</Text>
+                  <Text style={styles.statLabel}>Resolved</Text>
+                </View>
               </View>
             </View>
 
-            {/* Filter Chips Header */}
+            {/* Section 24: Error State with Retry Button */}
+            {errorMessage && (
+              <View style={styles.errorBanner}>
+                <Ionicons name="alert-circle" size={18} color="#DC2626" />
+                <Text style={styles.errorText}>{errorMessage}</Text>
+                <TouchableOpacity style={styles.retryBtn} onPress={loadDashboardData}>
+                  <Text style={styles.retryBtnText}>Retry</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {/* Filter Section */}
             <View style={styles.sectionHeaderRow}>
-              <Text style={styles.sectionTitle}>Active Nagpur Issues</Text>
+              <Text style={styles.sectionTitle}>Recent Complaints</Text>
               <Text style={styles.sectionCount}>
-                {filteredReports.length} {filteredReports.length === 1 ? 'ticket' : 'tickets'}
+                {filteredComplaints.length} {filteredComplaints.length === 1 ? 'ticket' : 'tickets'}
               </Text>
             </View>
 
@@ -246,16 +283,12 @@ export default function CitizenHomeScreen() {
               {[
                 { id: 'all', label: 'All Issues' },
                 { id: 'pothole', label: 'Potholes' },
-                { id: 'road_crack', label: 'Cracks' },
-                { id: 'water_pipeline_damage', label: 'Water Leaks' },
-                { id: 'streetlight_fault', label: 'Streetlights' },
+                { id: 'water', label: 'Water Supply' },
+                { id: 'streetlight', label: 'Streetlights' },
               ].map((chip) => (
                 <TouchableOpacity
                   key={chip.id}
-                  style={[
-                    styles.chip,
-                    selectedFilter === chip.id && styles.chipActive,
-                  ]}
+                  style={[styles.chip, selectedFilter === chip.id && styles.chipActive]}
                   onPress={() => setSelectedFilter(chip.id)}
                 >
                   <Text
@@ -272,13 +305,20 @@ export default function CitizenHomeScreen() {
           </>
         }
         ListEmptyComponent={
-          <View style={styles.emptyState}>
-            <Ionicons name="shield-checkmark-outline" size={48} color="#94A3B8" />
-            <Text style={styles.emptyTitle}>No defects found in this category</Text>
-            <Text style={styles.emptySub}>
-              All reported road segments in this filter have been resolved or are clear.
-            </Text>
-          </View>
+          loading ? (
+            <View style={styles.emptyState}>
+              <ActivityIndicator size="large" color="#EA580C" />
+              <Text style={styles.emptySub}>Loading active civic complaints...</Text>
+            </View>
+          ) : (
+            <View style={styles.emptyState}>
+              <Ionicons name="shield-checkmark-outline" size={48} color="#94A3B8" />
+              <Text style={styles.emptyTitle}>No complaints yet.</Text>
+              <Text style={styles.emptySub}>
+                Found a pothole or road defect? Report it now to keep Nagpur safe!
+              </Text>
+            </View>
+          )
         }
       />
     </SafeAreaView>
@@ -294,33 +334,33 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingTop: 14,
-    paddingBottom: 12,
+    paddingHorizontal: 18,
+    paddingTop: 12,
+    paddingBottom: 10,
     backgroundColor: '#FFFFFF',
     borderBottomWidth: 1,
     borderBottomColor: '#F1F5F9',
   },
-  brandSubtitle: {
+  greetingSubtitle: {
     fontSize: 10,
     fontWeight: '800',
     color: '#64748B',
     letterSpacing: 0.8,
   },
-  brandTitle: {
-    fontSize: 22,
+  greetingTitle: {
+    fontSize: 20,
     fontWeight: '900',
     color: '#0F172A',
-    letterSpacing: -0.5,
+    letterSpacing: -0.4,
   },
   roleToggle: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#F1F5F9',
     paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderRadius: 20,
-    gap: 6,
+    paddingVertical: 6,
+    borderRadius: 16,
+    gap: 5,
   },
   roleToggleText: {
     fontSize: 12,
@@ -329,24 +369,24 @@ const styles = StyleSheet.create({
   },
   listContent: {
     paddingHorizontal: 16,
-    paddingBottom: 40,
+    paddingBottom: 32,
   },
   heroCard: {
     backgroundColor: '#0F172A',
-    borderRadius: 20,
-    padding: 20,
-    marginTop: 16,
+    borderRadius: 18,
+    padding: 18,
+    marginTop: 14,
     shadowColor: '#0F172A',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.2,
-    shadowRadius: 16,
-    elevation: 8,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.18,
+    shadowRadius: 12,
+    elevation: 6,
   },
   heroBadgeRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginBottom: 10,
+    marginBottom: 8,
   },
   pulseDot: {
     width: 8,
@@ -358,77 +398,123 @@ const styles = StyleSheet.create({
     color: '#94A3B8',
     fontSize: 11,
     fontWeight: '700',
-    letterSpacing: 0.5,
   },
   heroHeadline: {
-    fontSize: 18,
-    fontWeight: '800',
+    fontSize: 19,
+    fontWeight: '900',
     color: '#FFFFFF',
-    lineHeight: 24,
-    marginBottom: 8,
+    marginBottom: 6,
   },
   heroSub: {
     fontSize: 12,
     color: '#94A3B8',
-    lineHeight: 18,
-    marginBottom: 18,
+    lineHeight: 17,
+    marginBottom: 16,
   },
   primaryActionButton: {
     backgroundColor: '#EA580C',
-    borderRadius: 14,
-    paddingVertical: 14,
-    paddingHorizontal: 16,
+    borderRadius: 12,
+    paddingVertical: 13,
+    paddingHorizontal: 14,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 10,
   },
+  secondaryUploadButton: {
+    marginTop: 8,
+    backgroundColor: '#1E293B',
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
   cameraIconCircle: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    width: 26,
+    height: 26,
+    borderRadius: 13,
     backgroundColor: '#FFFFFF',
     justifyContent: 'center',
     alignItems: 'center',
   },
   primaryActionText: {
     color: '#FFFFFF',
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '800',
-    letterSpacing: 0.2,
   },
-  secondaryUploadButton: {
-    marginTop: 10,
-    backgroundColor: '#1E293B',
-    borderWidth: 1,
-    borderColor: '#334155',
-  },
-  corridorBanner: {
-    backgroundColor: '#E0F2FE',
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+  statsCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    padding: 14,
     marginTop: 12,
-    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
   },
-  corridorHeader: {
+  statsHeaderTitle: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#64748B',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginBottom: 10,
+  },
+  statsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    alignItems: 'center',
+  },
+  statCol: {
+    alignItems: 'center',
+  },
+  statNumber: {
+    fontSize: 20,
+    fontWeight: '900',
+    color: '#0F172A',
+  },
+  statLabel: {
+    fontSize: 11,
+    color: '#64748B',
+    fontWeight: '600',
+    marginTop: 2,
+  },
+  statDivider: {
+    width: 1,
+    height: 28,
+    backgroundColor: '#E2E8F0',
+  },
+  errorBanner: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    backgroundColor: '#FEF2F2',
+    padding: 10,
+    borderRadius: 10,
+    marginTop: 12,
+    gap: 8,
   },
-  corridorHeaderText: {
-    fontSize: 11,
+  errorText: {
+    flex: 1,
+    fontSize: 12,
+    color: '#DC2626',
     fontWeight: '600',
-    color: '#0369A1',
+  },
+  retryBtn: {
+    backgroundColor: '#DC2626',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  retryBtnText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '700',
   },
   sectionHeaderRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 10,
+    marginTop: 16,
+    marginBottom: 8,
   },
   sectionTitle: {
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '800',
     color: '#0F172A',
   },
@@ -440,14 +526,14 @@ const styles = StyleSheet.create({
   filterChipsRow: {
     flexDirection: 'row',
     gap: 8,
-    marginBottom: 16,
+    marginBottom: 12,
     flexWrap: 'wrap',
   },
   chip: {
     backgroundColor: '#FFFFFF',
     paddingHorizontal: 12,
     paddingVertical: 6,
-    borderRadius: 20,
+    borderRadius: 16,
     borderWidth: 1,
     borderColor: '#E2E8F0',
   },
@@ -465,23 +551,23 @@ const styles = StyleSheet.create({
   },
   card: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    marginBottom: 14,
+    borderRadius: 14,
+    marginBottom: 12,
     flexDirection: 'row',
     padding: 12,
     borderWidth: 1,
     borderColor: '#F1F5F9',
+    gap: 12,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.04,
-    shadowRadius: 6,
+    shadowRadius: 4,
     elevation: 2,
-    gap: 12,
   },
   cardImage: {
-    width: 90,
-    height: 100,
-    borderRadius: 12,
+    width: 84,
+    height: 94,
+    borderRadius: 10,
     backgroundColor: '#E2E8F0',
   },
   cardBody: {
@@ -494,20 +580,35 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   statusBadge: {
-    paddingHorizontal: 8,
+    paddingHorizontal: 7,
     paddingVertical: 2,
     borderRadius: 6,
   },
   statusText: {
     fontSize: 10,
     fontWeight: '700',
-    textTransform: 'uppercase',
+  },
+  idBadge: {
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  idBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#475569',
   },
   cardTitle: {
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '800',
     color: '#0F172A',
-    marginTop: 4,
+    marginTop: 2,
+  },
+  cardDept: {
+    fontSize: 11,
+    color: '#EA580C',
+    fontWeight: '700',
   },
   locationRow: {
     flexDirection: 'row',
@@ -516,41 +617,45 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   cardLocation: {
-    fontSize: 12,
-    color: '#64748B',
-    fontWeight: '500',
-    flex: 1,
-  },
-  cardDesc: {
     fontSize: 11,
-    color: '#475569',
-    lineHeight: 15,
-    marginTop: 4,
+    color: '#64748B',
+    flex: 1,
   },
   cardFooter: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginTop: 6,
+    marginTop: 4,
   },
-  corroborateBadge: {
+  aiBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#FFF7ED',
+    backgroundColor: '#DCFCE7',
     paddingHorizontal: 6,
     paddingVertical: 2,
-    borderRadius: 10,
+    borderRadius: 6,
     gap: 3,
   },
-  corroborateText: {
+  aiBadgeText: {
     fontSize: 10,
     fontWeight: '700',
-    color: '#EA580C',
+    color: '#15803D',
+  },
+  severityBadge: {
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  severityText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#64748B',
   },
   emptyState: {
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 40,
+    paddingVertical: 36,
     gap: 8,
   },
   emptyTitle: {

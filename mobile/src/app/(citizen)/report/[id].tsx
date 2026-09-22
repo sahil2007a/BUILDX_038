@@ -12,34 +12,38 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { SeverityBadge } from '@/components/SeverityBadge';
-import { SLACountdown } from '@/components/SLACountdown';
 import { api } from '@/lib/api';
-import { Report, ReportStatus } from '@/types/report';
+import { Complaint, ComplaintStatus } from '@/types/report';
 
-const STATUS_STEPS: Array<{ key: ReportStatus; label: string; desc: string }> = [
-  { key: 'reported', label: 'Reported', desc: 'Complaint received & logged' },
-  { key: 'verified', label: 'AI Verified', desc: 'Defect classified & dedup checked' },
-  { key: 'assigned', label: 'Assigned', desc: 'Routed to ward field team' },
-  { key: 'in_progress', label: 'In Progress', desc: 'Contractor on-site repair' },
-  { key: 'resolved', label: 'Resolved', desc: 'AI photo closure verified' },
+const STATUS_STEPS: Array<{ key: ComplaintStatus; label: string; desc: string }> = [
+  { key: 'Submitted', label: 'Submitted', desc: 'Complaint received & registered in NMC DB' },
+  { key: 'Under Review', label: 'Under Review', desc: 'AI verified & checked by ward triage team' },
+  { key: 'Assigned', label: 'Assigned', desc: 'Assigned to field repair engineer & contractor' },
+  { key: 'In Progress', label: 'In Progress', desc: 'Active road patch / utility repair on site' },
+  { key: 'Resolved', label: 'Resolved', desc: 'Repair completed & verified' },
 ];
 
 export default function TicketDetailScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id: string }>();
-  const [report, setReport] = useState<Report | null>(null);
+  const [complaint, setComplaint] = useState<Complaint | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const fetchReport = async () => {
       try {
         if (id) {
-          const data = await api.getReport(id);
-          setReport(data);
+          const data = await api.getComplaintDetail(id);
+          setComplaint(data);
         }
       } catch (err) {
-        console.warn('Failed to load report:', err);
+        try {
+          const list = await api.getComplaints();
+          const found = list.find((c) => c.id === id);
+          if (found) setComplaint(found);
+        } catch {
+          // ignore
+        }
       } finally {
         setLoading(false);
       }
@@ -57,20 +61,28 @@ export default function TicketDetailScreen() {
     );
   }
 
-  if (!report) {
+  if (!complaint) {
     return (
       <SafeAreaView style={styles.centerContainer}>
         <Ionicons name="alert-circle-outline" size={48} color="#EF4444" />
-        <Text style={styles.errorText}>Ticket not found.</Text>
-        <TouchableOpacity style={styles.backHomeBtn} onPress={() => router.replace('/(citizen)')}>
+        <Text style={styles.errorText}>Ticket #{id} not found.</Text>
+        <TouchableOpacity style={styles.backHomeBtn} onPress={() => router.replace('/(citizen)' as any)}>
           <Text style={styles.backHomeText}>Return to Home</Text>
         </TouchableOpacity>
       </SafeAreaView>
     );
   }
 
-  const currentStepIndex = STATUS_STEPS.findIndex((s) => s.key === report.status);
-  const activeIndex = currentStepIndex >= 0 ? currentStepIndex : 0;
+  // Normalize status key for stepper
+  let activeIndex = STATUS_STEPS.findIndex(
+    (s) => s.key.toLowerCase() === complaint.status.toLowerCase()
+  );
+  if (activeIndex < 0) activeIndex = 0;
+
+  const primaryBox =
+    complaint.bounding_boxes && complaint.bounding_boxes.length > 0
+      ? complaint.bounding_boxes[0]
+      : null;
 
   return (
     <SafeAreaView style={styles.container}>
@@ -78,71 +90,87 @@ export default function TicketDetailScreen() {
 
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity style={styles.backButton} onPress={() => router.replace('/(citizen)')}>
-          <Ionicons name="arrow-back" size={22} color="#0F172A" />
+        <TouchableOpacity style={styles.backButton} onPress={() => router.replace('/(citizen)' as any)}>
+          <Ionicons name="arrow-back" size={20} color="#0F172A" />
         </TouchableOpacity>
         <View style={styles.headerCenter}>
-          <Text style={styles.headerSubtitle}>TICKET TRACKER</Text>
-          <Text style={styles.headerTitle}>#{report.id}</Text>
+          <Text style={styles.headerSubtitle}>COMPLAINT TRACKER</Text>
+          <Text style={styles.headerTitle}>{complaint.id}</Text>
         </View>
         <View style={{ width: 40 }} />
       </View>
 
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        {/* Photo Card */}
+        {/* Photo Container with Bounding Box Overlay */}
         <View style={styles.photoContainer}>
-          <Image source={{ uri: report.photo_url }} style={styles.photo} />
+          <Image source={{ uri: complaint.image_url }} style={styles.photo} />
+
+          {primaryBox && (
+            <View
+              style={[
+                styles.imageBbox,
+                {
+                  left: `${primaryBox.x * 100}%`,
+                  top: `${primaryBox.y * 100}%`,
+                  width: `${primaryBox.width * 100}%`,
+                  height: `${primaryBox.height * 100}%`,
+                },
+              ]}
+            >
+              <View style={styles.imageBboxBadge}>
+                <Text style={styles.imageBboxText}>
+                  POTHOLE {complaint.ai_confidence ? `${(complaint.ai_confidence * 100).toFixed(1)}%` : ''}
+                </Text>
+              </View>
+            </View>
+          )}
+
           <View style={styles.photoOverlayBadge}>
-            <SeverityBadge score={report.severity_score} size="sm" />
+            <View style={styles.severityTag}>
+              <Text style={styles.severityTagText}>{complaint.severity} Risk</Text>
+            </View>
           </View>
         </View>
 
         {/* Overview Details */}
         <View style={styles.sectionCard}>
           <View style={styles.titleRow}>
-            <Text style={styles.categoryTitle}>
-              {report.category.replace('_', ' ').toUpperCase()}
-            </Text>
-            {report.sla_deadline && <SLACountdown deadline={report.sla_deadline} />}
+            <Text style={styles.categoryTitle}>{complaint.issue_type}</Text>
+            <View style={styles.statusBadge}>
+              <Text style={styles.statusBadgeText}>{complaint.status.toUpperCase()}</Text>
+            </View>
+          </View>
+
+          <View style={styles.metaRow}>
+            <Ionicons name="business" size={14} color="#EA580C" />
+            <Text style={styles.deptMetaText}>{complaint.department_name}</Text>
           </View>
 
           <View style={styles.metaRow}>
             <Ionicons name="location-sharp" size={14} color="#64748B" />
-            <Text style={styles.metaText}>{report.ward || 'Nagpur Zone'}</Text>
+            <Text style={styles.metaText}>{complaint.address}</Text>
           </View>
 
-          <View style={styles.metaRow}>
-            <Ionicons name="business" size={14} color="#64748B" />
-            <Text style={styles.metaText}>
-              {report.assigned_department || 'NMC Road Maintenance'}
-            </Text>
-          </View>
-
-          {report.description ? (
-            <View style={styles.descBox}>
-              <Text style={styles.descLabel}>Citizen Note:</Text>
-              <Text style={styles.descContent}>{report.description}</Text>
+          {complaint.ai_confidence ? (
+            <View style={styles.aiVerificationRow}>
+              <Ionicons name="scan" size={14} color="#16A34A" />
+              <Text style={styles.aiVerificationText}>
+                YOLOv8 AI Verified: {(complaint.ai_confidence * 100).toFixed(1)}% Confidence
+              </Text>
             </View>
           ) : null}
 
-          {report.corroborating_count > 1 && (
-            <View style={styles.corroboratingCard}>
-              <Ionicons name="people-circle" size={24} color="#EA580C" />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.corroboratingHeadline}>
-                  +{report.corroborating_count} Citizens Corroborated
-                </Text>
-                <Text style={styles.corroboratingSub}>
-                  Multiple reports merged to prevent duplicate tickets and boost NMC repair urgency.
-                </Text>
-              </View>
+          {complaint.description ? (
+            <View style={styles.descBox}>
+              <Text style={styles.descLabel}>Your Note:</Text>
+              <Text style={styles.descContent}>"{complaint.description}"</Text>
             </View>
-          )}
+          ) : null}
         </View>
 
-        {/* Status Timeline */}
+        {/* Section 32: Status Timeline Stepper */}
         <View style={styles.sectionCard}>
-          <Text style={styles.timelineHeader}>RESOLUTION TIMELINE</Text>
+          <Text style={styles.timelineHeader}>RESOLUTION LIFECYCLE</Text>
 
           <View style={styles.timelineList}>
             {STATUS_STEPS.map((step, idx) => {
@@ -185,6 +213,7 @@ export default function TicketDetailScreen() {
                       style={[
                         styles.stepLabel,
                         isCurrent && styles.stepLabelCurrent,
+                        isPast && styles.stepLabelPast,
                       ]}
                     >
                       {step.label}
@@ -202,9 +231,9 @@ export default function TicketDetailScreen() {
       <View style={styles.bottomBar}>
         <TouchableOpacity
           style={styles.homeButton}
-          onPress={() => router.replace('/(citizen)')}
+          onPress={() => router.replace('/(citizen)' as any)}
         >
-          <Text style={styles.homeButtonText}>Back to Nagpur Live Feed</Text>
+          <Text style={styles.homeButtonText}>Back to Live Feed</Text>
         </TouchableOpacity>
       </View>
     </SafeAreaView>
@@ -256,9 +285,9 @@ const styles = StyleSheet.create({
     borderBottomColor: '#F1F5F9',
   },
   backButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
     justifyContent: 'center',
     alignItems: 'center',
     backgroundColor: '#F1F5F9',
@@ -267,14 +296,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   headerSubtitle: {
-    fontSize: 10,
+    fontSize: 9,
     fontWeight: '800',
     color: '#64748B',
     letterSpacing: 0.8,
   },
   headerTitle: {
     fontSize: 16,
-    fontWeight: '800',
+    fontWeight: '900',
     color: '#0F172A',
   },
   scrollContent: {
@@ -282,11 +311,11 @@ const styles = StyleSheet.create({
     paddingBottom: 30,
   },
   photoContainer: {
-    borderRadius: 18,
+    borderRadius: 16,
     overflow: 'hidden',
     height: 220,
     backgroundColor: '#0F172A',
-    marginBottom: 16,
+    marginBottom: 14,
     position: 'relative',
   },
   photo: {
@@ -294,16 +323,50 @@ const styles = StyleSheet.create({
     height: '100%',
     resizeMode: 'cover',
   },
+  imageBbox: {
+    position: 'absolute',
+    borderWidth: 2.5,
+    borderColor: '#EF4444',
+    borderStyle: 'dashed',
+    borderRadius: 6,
+    backgroundColor: 'rgba(239, 68, 68, 0.2)',
+    zIndex: 10,
+  },
+  imageBboxBadge: {
+    position: 'absolute',
+    top: -24,
+    left: 0,
+    backgroundColor: '#EF4444',
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  imageBboxText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '800',
+  },
   photoOverlayBadge: {
     position: 'absolute',
-    top: 12,
-    right: 12,
+    top: 10,
+    right: 10,
+  },
+  severityTag: {
+    backgroundColor: 'rgba(15, 23, 42, 0.85)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  severityTagText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '700',
   },
   sectionCard: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 16,
+    borderRadius: 14,
     padding: 16,
-    marginBottom: 16,
+    marginBottom: 14,
     borderWidth: 1,
     borderColor: '#E2E8F0',
   },
@@ -311,12 +374,23 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 8,
+    marginBottom: 6,
   },
   categoryTitle: {
     fontSize: 18,
-    fontWeight: '800',
+    fontWeight: '900',
     color: '#0F172A',
+  },
+  statusBadge: {
+    backgroundColor: '#EFF6FF',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  statusBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#2563EB',
   },
   metaRow: {
     flexDirection: 'row',
@@ -324,69 +398,70 @@ const styles = StyleSheet.create({
     gap: 6,
     marginTop: 4,
   },
-  metaText: {
+  deptMetaText: {
     fontSize: 13,
+    color: '#EA580C',
+    fontWeight: '700',
+  },
+  metaText: {
+    fontSize: 12,
     color: '#475569',
     fontWeight: '500',
+    flex: 1,
+  },
+  aiVerificationRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F0FDF4',
+    padding: 8,
+    borderRadius: 8,
+    gap: 6,
+    marginTop: 10,
+  },
+  aiVerificationText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#15803D',
   },
   descBox: {
     backgroundColor: '#F8FAFC',
-    borderRadius: 10,
+    borderRadius: 8,
     padding: 10,
-    marginTop: 12,
+    marginTop: 10,
   },
   descLabel: {
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: '700',
     color: '#64748B',
     marginBottom: 2,
   },
   descContent: {
-    fontSize: 13,
+    fontSize: 12,
     color: '#1E293B',
-    lineHeight: 18,
-  },
-  corroboratingCard: {
-    flexDirection: 'row',
-    backgroundColor: '#FFF7ED',
-    borderRadius: 12,
-    padding: 12,
-    alignItems: 'center',
-    marginTop: 12,
-    gap: 10,
-  },
-  corroboratingHeadline: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#C2410C',
-  },
-  corroboratingSub: {
-    fontSize: 11,
-    color: '#9A3412',
-    lineHeight: 15,
+    lineHeight: 17,
   },
   timelineHeader: {
     fontSize: 11,
     fontWeight: '800',
     color: '#64748B',
     letterSpacing: 0.8,
-    marginBottom: 16,
+    marginBottom: 14,
   },
   timelineList: {
     paddingLeft: 4,
   },
   timelineItem: {
     flexDirection: 'row',
-    minHeight: 52,
+    minHeight: 48,
   },
   iconColumn: {
     alignItems: 'center',
-    width: 24,
+    width: 22,
   },
   timelineDot: {
-    width: 20,
-    height: 20,
-    borderRadius: 10,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
     borderWidth: 2,
     borderColor: '#CBD5E1',
     backgroundColor: '#FFFFFF',
@@ -401,9 +476,9 @@ const styles = StyleSheet.create({
     borderColor: '#EA580C',
   },
   innerDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
+    width: 6,
+    height: 6,
+    borderRadius: 3,
     backgroundColor: 'transparent',
   },
   timelineLine: {
@@ -417,19 +492,22 @@ const styles = StyleSheet.create({
   },
   timelineTextColumn: {
     flex: 1,
-    paddingLeft: 12,
-    paddingBottom: 14,
+    paddingLeft: 10,
+    paddingBottom: 12,
   },
   stepLabel: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '700',
     color: '#64748B',
   },
   stepLabelCurrent: {
     color: '#0F172A',
   },
+  stepLabelPast: {
+    color: '#16A34A',
+  },
   stepDesc: {
-    fontSize: 12,
+    fontSize: 11,
     color: '#94A3B8',
     marginTop: 2,
   },
@@ -442,7 +520,7 @@ const styles = StyleSheet.create({
   },
   homeButton: {
     backgroundColor: '#0F172A',
-    paddingVertical: 14,
+    paddingVertical: 13,
     borderRadius: 12,
     alignItems: 'center',
   },

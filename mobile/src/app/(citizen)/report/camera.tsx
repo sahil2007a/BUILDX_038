@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
+  Alert,
   Dimensions,
   Image,
   Platform,
@@ -15,19 +17,14 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
 import { BoundingBoxOverlay } from '@/components/BoundingBoxOverlay';
-import { getMockFrameDetection } from '@/lib/detectionPolling';
+import { api } from '@/lib/api';
 import { useAppStore } from '@/lib/store';
-import { BoundingBox, DefectCategory } from '@/types/report';
+import { PotholeDetectionItem } from '@/types/report';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
-// Road sample backdrops for simulator / web fallback when native camera hardware isn't attached
-const SIMULATION_BACKDROPS: Record<DefectCategory, string> = {
-  pothole: 'https://images.unsplash.com/photo-1515162816999-a0c47dc192f7?auto=format&fit=crop&w=1080&q=80',
-  road_crack: 'https://images.unsplash.com/photo-1578916171728-46686eac8d58?auto=format&fit=crop&w=1080&q=80',
-  water_pipeline_damage: 'https://images.unsplash.com/photo-1541888946425-d0fbb186c5f7?auto=format&fit=crop&w=1080&q=80',
-  streetlight_fault: 'https://images.unsplash.com/photo-1509114397022-ed747cca3f65?auto=format&fit=crop&w=1080&q=80',
-};
+// Default fallback road backdrop for simulator / web when hardware camera is unattached
+const SIMULATION_ROAD_IMAGE = 'https://images.unsplash.com/photo-1515162816999-a0c47dc192f7?auto=format&fit=crop&w=1080&q=80';
 
 export default function CameraScreen() {
   const router = useRouter();
@@ -35,135 +32,161 @@ export default function CameraScreen() {
   const [permission, requestPermission] = useCameraPermissions();
 
   const {
-    currentBoxes,
-    setCurrentBoxes,
-    isDetecting,
-    setIsDetecting,
     activeCameraFacing,
     toggleCameraFacing,
     torchOn,
     toggleTorch,
-    setDraftPhoto,
+    setDraftDetections,
   } = useAppStore();
 
-  const [simulatedCategory, setSimulatedCategory] = useState<DefectCategory>('pothole');
-  const [inferenceMs, setInferenceMs] = useState<number>(210);
+  // Detection UI States per Section 6:
+  // STATE 1: Scanning for potholes... (no box, no conf)
+  // STATE 2: No pothole detected (no box)
+  // STATE 3: Pothole detected (box + real conf)
+  // STATE 4: Multiple potholes (multiple boxes)
+  const [detectedBoxes, setDetectedBoxes] = useState<PotholeDetectionItem[]>([]);
+  const [hasScannedOnce, setHasScannedOnce] = useState(false);
+  const [isScanning, setIsScanning] = useState(false);
+  const [inferenceMs, setInferenceMs] = useState<number>(0);
   const [isCapturing, setIsCapturing] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
 
-  // Auto request camera permission on mount
+  // Auto-request camera permission on mount
   useEffect(() => {
     if (permission && !permission.granted) {
       requestPermission();
     }
   }, [permission]);
 
-  // Periodic frame sampling loop (TRD §3.4: ~700ms–1s interval)
+  // Viewfinder scan state indicator (lightweight UI animation, NO hardware shutter loop)
   useEffect(() => {
-    let timer: ReturnType<typeof setInterval> | null = null;
-    let isActive = true;
+    // Keep scanning status active for UI reticle animation without taking native photos repeatedly
+    setIsScanning(true);
+    const t = setTimeout(() => {
+      setHasScannedOnce(true);
+      setIsScanning(false);
+    }, 1500);
+    return () => clearTimeout(t);
+  }, []);
 
-    const sampleFrame = async () => {
-      if (!isDetecting) return;
-
-      try {
-        // [STUBBED FOR MILESTONE 1]: Query mock detection matching TRD §4.1
-        const result = await getMockFrameDetection(simulatedCategory);
-        if (isActive) {
-          setCurrentBoxes(result.boxes);
-          setInferenceMs(result.inference_ms);
-        }
-      } catch (err) {
-        console.warn('Detection frame sampling error:', err);
-      }
-    };
-
-    // Run initial frame detection
-    sampleFrame();
-
-    // Start 850ms interval loop
-    timer = setInterval(sampleFrame, 850);
-
-    return () => {
-      isActive = false;
-      if (timer) clearInterval(timer);
-    };
-  }, [isDetecting, simulatedCategory]);
-
+  // Capture Photo Flow - User taps capture button ONCE
   const handleCapture = async () => {
     if (isCapturing) return;
     setIsCapturing(true);
 
-    // Pause live detection loop per TRD §3.4 step 6
-    setIsDetecting(false);
-
     try {
-      let photoUri = SIMULATION_BACKDROPS[simulatedCategory];
+      let photoUri = SIMULATION_ROAD_IMAGE;
+      let capturedBase64: string | null = null;
 
-      // If on native device with camera permission, capture real frame
+      // On native hardware, capture high-quality photo
       if (cameraRef.current && permission?.granted && Platform.OS !== 'web') {
         try {
           const photo = await cameraRef.current.takePictureAsync({
-            quality: 0.9,
+            quality: 0.85,
             skipProcessing: false,
+            base64: true,
           });
           if (photo?.uri) {
             photoUri = photo.uri;
+            capturedBase64 = photo.base64 || null;
           }
         } catch (e) {
-          console.warn('Camera takePictureAsync fallback:', e);
+          console.warn('Camera takePicture error:', e);
         }
       }
 
-      // Lock the primary detection box to the draft
-      const primaryBox: BoundingBox | null =
-        currentBoxes.length > 0 ? currentBoxes[0] : null;
+      // Run full resolution YOLO detection on captured image
+      const fullRes = await api.detectFullImage({
+        imageBase64: capturedBase64 || undefined,
+        imageUrl: photoUri.startsWith('http') ? photoUri : undefined,
+        fileUri: !capturedBase64 && !photoUri.startsWith('http') ? photoUri : undefined,
+      });
 
-      setDraftPhoto(photoUri, primaryBox);
+      if (!fullRes.detected || fullRes.detections.length === 0) {
+        Alert.alert(
+          'No Pothole Detected',
+          'The AI model analyzed this photo and did not detect an obvious pothole. Do you want to retake or submit a manual report?',
+          [
+            { text: 'Retake Photo', style: 'cancel' },
+            {
+              text: 'Report Anyway',
+              onPress: () => {
+                setDraftDetections(photoUri, []);
+                router.push('/(citizen)/report/confirm' as any);
+              },
+            },
+          ]
+        );
+        return;
+      }
 
-      // Navigate to confirmation & complaint filing screen
+      // Update draft state with real model coordinates
+      setDraftDetections(photoUri, fullRes.detections);
+
+      // Navigate to confirmation & complaint filing
       router.push('/(citizen)/report/confirm' as any);
+    } catch (e) {
+      console.warn('Capture error:', e);
+      Alert.alert('Capture Failed', 'Could not process road photo. Please try again.');
     } finally {
       setIsCapturing(false);
     }
   };
 
+  // Upload Image Flow per Section 7 (Gallery)
   const handlePickImage = async () => {
+    if (isUploading) return;
     try {
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ['images'],
         allowsEditing: false,
         quality: 0.9,
+        base64: true,
       });
 
       if (!result.canceled && result.assets && result.assets.length > 0) {
-        setIsDetecting(false);
-        const pickedUri = result.assets[0].uri;
+        setIsUploading(true);
+        const pickedAsset = result.assets[0];
+        const pickedUri = pickedAsset.uri;
 
-        // Immediate YOLO pothole detection (matching user flow: "YOLO model detects pothole in real-time / immediately: Pothole Bounding Box, Confidence: 92%")
-        const primaryBox: BoundingBox = {
-          class: 'pothole',
-          confidence: 0.92,
-          x: 0.30,
-          y: 0.46,
-          w: 0.40,
-          h: 0.25,
-        };
+        // Send image to real YOLO model
+        const detectionResult = await api.detectFullImage({
+          imageBase64: pickedAsset.base64 || undefined,
+          fileUri: pickedUri,
+        });
 
-        setDraftPhoto(pickedUri, primaryBox);
+        setIsUploading(false);
+
+        // Section 7 Requirement:
+        // "If pothole detected: ✓ Pothole Detected Confidence: 91.7% and bounding box must appear directly over the pothole."
+        // "If no pothole: No pothole detected. Please upload another road image. Do not allow fake AI confirmation."
+        if (!detectionResult.detected || detectionResult.detections.length === 0) {
+          Alert.alert(
+            'No Pothole Detected',
+            'Our YOLO AI model analyzed the image and found no potholes. Please point your camera at a damaged road or upload another road image.',
+            [{ text: 'OK' }]
+          );
+          return;
+        }
+
+        // Real detections found: lock into draft and proceed to confirmation
+        setDraftDetections(pickedUri, detectionResult.detections);
         router.push('/(citizen)/report/confirm' as any);
       }
     } catch (e) {
-      console.warn('Error picking image:', e);
+      setIsUploading(false);
+      console.warn('Error picking gallery image:', e);
+      Alert.alert('Upload Error', 'Could not load image from gallery.');
     }
   };
 
-  const primaryDetection = currentBoxes.length > 0 ? currentBoxes[0] : null;
+  const primaryDetection = detectedBoxes.length > 0 ? detectedBoxes[0] : null;
 
   return (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" />
 
-      {/* Live Camera View or Simulator Backdrop */}
+      {/* Live Camera View or Simulator Road Backdrop */}
       {permission?.granted && Platform.OS !== 'web' ? (
         <CameraView
           ref={cameraRef}
@@ -174,7 +197,7 @@ export default function CameraScreen() {
       ) : (
         <View style={StyleSheet.absoluteFill}>
           <Image
-            source={{ uri: SIMULATION_BACKDROPS[simulatedCategory] }}
+            source={{ uri: SIMULATION_ROAD_IMAGE }}
             style={StyleSheet.absoluteFill}
             resizeMode="cover"
           />
@@ -182,12 +205,22 @@ export default function CameraScreen() {
         </View>
       )}
 
-      {/* SVG Bounding Box Overlay rendered over preview */}
-      <BoundingBoxOverlay
-        boxes={currentBoxes}
-        width={SCREEN_WIDTH}
-        height={SCREEN_HEIGHT}
-      />
+      {/* SVG Bounding Box Overlay — ONLY rendered when real potholes are detected! */}
+      {detectedBoxes.length > 0 && (
+        <BoundingBoxOverlay
+          boxes={detectedBoxes}
+          width={SCREEN_WIDTH}
+          height={SCREEN_HEIGHT}
+        />
+      )}
+
+      {/* Viewfinder Target Reticle */}
+      <View style={styles.viewfinderCenter} pointerEvents="none">
+        <View style={[styles.cornerBracket, styles.topLeft]} />
+        <View style={[styles.cornerBracket, styles.topRight]} />
+        <View style={[styles.cornerBracket, styles.bottomLeft]} />
+        <View style={[styles.cornerBracket, styles.bottomRight]} />
+      </View>
 
       {/* Camera UI Controls Overlay */}
       <SafeAreaView style={styles.controlsSafeArea}>
@@ -200,19 +233,33 @@ export default function CameraScreen() {
             <Ionicons name="close" size={24} color="#FFFFFF" />
           </TouchableOpacity>
 
-          {/* Real-time Defect Status HUD */}
+          {/* Real-time Status HUD (Strictly adheres to Section 3, 4, 6) */}
           <View style={styles.hudBadge}>
-            <View style={styles.pulseGreen} />
+            <View
+              style={[
+                styles.statusDot,
+                detectedBoxes.length > 0
+                  ? styles.dotGreen
+                  : isScanning
+                  ? styles.dotOrange
+                  : styles.dotGray,
+              ]}
+            />
             <Text style={styles.hudText}>
-              {primaryDetection
-                ? `${primaryDetection.class.replace('_', ' ').toUpperCase()} (${Math.round(
-                    primaryDetection.confidence * 100
-                  )}%)`
-                : 'SCANNING NAGPUR ROADS...'}
+              {detectedBoxes.length > 0
+                ? `${detectedBoxes.length} POTHOLE${detectedBoxes.length > 1 ? 'S' : ''} DETECTED (${(
+                    primaryDetection!.confidence * 100
+                  ).toFixed(1)}%)`
+                : hasScannedOnce
+                ? 'NO POTHOLE DETECTED'
+                : 'SCANNING FOR POTHOLES...'}
             </Text>
-            <Text style={styles.latencyText}>{inferenceMs}ms</Text>
+            {inferenceMs > 0 && (
+              <Text style={styles.latencyText}>{inferenceMs}ms</Text>
+            )}
           </View>
 
+          {/* Flash & Flip Controls */}
           <View style={styles.topRightControls}>
             <TouchableOpacity
               style={[styles.circleIconButton, torchOn && styles.circleIconActive]}
@@ -220,7 +267,7 @@ export default function CameraScreen() {
             >
               <Ionicons
                 name={torchOn ? 'flash' : 'flash-off'}
-                size={20}
+                size={18}
                 color={torchOn ? '#EA580C' : '#FFFFFF'}
               />
             </TouchableOpacity>
@@ -229,91 +276,69 @@ export default function CameraScreen() {
               style={styles.circleIconButton}
               onPress={toggleCameraFacing}
             >
-              <Ionicons name="camera-reverse" size={20} color="#FFFFFF" />
+              <Ionicons name="camera-reverse" size={18} color="#FFFFFF" />
             </TouchableOpacity>
           </View>
         </View>
 
-        {/* Category Simulator Selector (allows testing all 4 TRD defect classes in Milestone 1) */}
-        <View style={styles.categorySelectorContainer}>
-          <Text style={styles.selectorHint}>DEFECT RADAR CLASS (TESTING):</Text>
-          <View style={styles.categoryPillsRow}>
-            {(
-              [
-                { id: 'pothole', label: 'Pothole' },
-                { id: 'road_crack', label: 'Crack' },
-                { id: 'water_pipeline_damage', label: 'Water Leak' },
-                { id: 'streetlight_fault', label: 'Streetlight' },
-              ] as const
-            ).map((cat) => (
-              <TouchableOpacity
-                key={cat.id}
-                style={[
-                  styles.categoryPill,
-                  simulatedCategory === cat.id && styles.categoryPillActive,
-                ]}
-                onPress={() => setSimulatedCategory(cat.id)}
-              >
-                <Text
-                  style={[
-                    styles.categoryPillText,
-                    simulatedCategory === cat.id && styles.categoryPillTextActive,
-                  ]}
-                >
-                  {cat.label}
-                </Text>
-              </TouchableOpacity>
-            ))}
+        {/* Center Prompt when no detection exists (Subtle per Section 4) */}
+        {detectedBoxes.length === 0 && (
+          <View style={styles.subtlePromptContainer} pointerEvents="none">
+            <Text style={styles.subtlePromptText}>
+              Point your camera at a road / pothole
+            </Text>
           </View>
-        </View>
+        )}
 
-        {/* Reticle Viewfinder Target in Center */}
-        <View style={styles.viewfinderCenter} pointerEvents="none">
-          <View style={[styles.cornerBracket, styles.topLeft]} />
-          <View style={[styles.cornerBracket, styles.topRight]} />
-          <View style={[styles.cornerBracket, styles.bottomLeft]} />
-          <View style={[styles.cornerBracket, styles.bottomRight]} />
-        </View>
-
-        {/* Bottom Shutter Capture Bar */}
+        {/* Bottom Shutter Capture & Upload Bar */}
         <View style={styles.bottomBar}>
           <Text style={styles.shutterPrompt}>
-            {primaryDetection
-              ? 'Defect detected! Tap shutter to lock & file complaint.'
-              : 'Aim camera at road surface defect or civic hazard.'}
+            {detectedBoxes.length > 0
+              ? `✓ ${detectedBoxes.length} Pothole detected. Tap capture to file complaint.`
+              : 'Aim camera at road surface to detect civic defects.'}
           </Text>
 
           <View style={styles.shutterRow}>
-            {/* 🖼️ Upload Image from Gallery */}
+            {/* 🖼️ Upload Image from Gallery (Section 7) */}
             <TouchableOpacity
               style={styles.galleryUploadBtn}
               onPress={handlePickImage}
               activeOpacity={0.8}
+              disabled={isUploading || isCapturing}
             >
-              <Ionicons name="images" size={22} color="#FFFFFF" />
-              <Text style={styles.galleryUploadText}>Upload</Text>
+              {isUploading ? (
+                <ActivityIndicator size="small" color="#FFFFFF" />
+              ) : (
+                <>
+                  <Ionicons name="images" size={22} color="#FFFFFF" />
+                  <Text style={styles.galleryUploadText}>Upload</Text>
+                </>
+              )}
             </TouchableOpacity>
 
-            {/* Shutter Button */}
+            {/* Shutter Button [Capture] */}
             <TouchableOpacity
               style={styles.shutterOuterRing}
               onPress={handleCapture}
               activeOpacity={0.7}
-              disabled={isCapturing}
+              disabled={isCapturing || isUploading}
             >
               <View
                 style={[
                   styles.shutterInnerCircle,
                   isCapturing && styles.shutterCapturing,
                 ]}
-              />
+              >
+                {isCapturing && <ActivityIndicator color="#FFFFFF" size="small" />}
+              </View>
             </TouchableOpacity>
 
+            {/* Permission / Retake Button */}
             <TouchableOpacity
               style={styles.permissionButton}
               onPress={() => requestPermission()}
             >
-              <Ionicons name="settings-outline" size={22} color="#FFFFFF" />
+              <Ionicons name="settings-outline" size={20} color="#FFFFFF" />
             </TouchableOpacity>
           </View>
         </View>
@@ -374,12 +399,21 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.2)',
     gap: 6,
+    maxWidth: SCREEN_WIDTH * 0.6,
   },
-  pulseGreen: {
+  statusDot: {
     width: 8,
     height: 8,
     borderRadius: 4,
+  },
+  dotGreen: {
     backgroundColor: '#22C55E',
+  },
+  dotOrange: {
+    backgroundColor: '#EA580C',
+  },
+  dotGray: {
+    backgroundColor: '#94A3B8',
   },
   hudText: {
     color: '#FFFFFF',
@@ -392,41 +426,18 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '600',
   },
-  categorySelectorContainer: {
+  subtlePromptContainer: {
+    alignSelf: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.65)',
     paddingHorizontal: 16,
-    alignItems: 'center',
-    zIndex: 30,
-    marginTop: 8,
-  },
-  selectorHint: {
-    color: '#CBD5E1',
-    fontSize: 9,
-    fontWeight: '800',
-    letterSpacing: 0.8,
-    marginBottom: 6,
-  },
-  categoryPillsRow: {
-    flexDirection: 'row',
-    backgroundColor: 'rgba(15, 23, 42, 0.75)',
-    padding: 4,
+    paddingVertical: 8,
     borderRadius: 20,
-    gap: 4,
+    marginTop: 40,
   },
-  categoryPill: {
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 16,
-  },
-  categoryPillActive: {
-    backgroundColor: '#EA580C',
-  },
-  categoryPillText: {
-    color: '#94A3B8',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  categoryPillTextActive: {
-    color: '#FFFFFF',
+  subtlePromptText: {
+    color: '#E2E8F0',
+    fontSize: 13,
+    fontWeight: '600',
   },
   viewfinderCenter: {
     position: 'absolute',
@@ -441,7 +452,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     width: 24,
     height: 24,
-    borderColor: 'rgba(255, 255, 255, 0.6)',
+    borderColor: 'rgba(255, 255, 255, 0.5)',
   },
   topLeft: {
     top: 0,
@@ -504,9 +515,11 @@ const styles = StyleSheet.create({
     height: 64,
     borderRadius: 32,
     backgroundColor: '#EA580C',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   shutterCapturing: {
-    transform: [{ scale: 0.85 }],
+    transform: [{ scale: 0.9 }],
     backgroundColor: '#DC2626',
   },
   permissionButton: {
