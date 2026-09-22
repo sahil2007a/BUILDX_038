@@ -59,6 +59,7 @@ export interface CreateReportRequest {
   lng: number;
   description?: string;
   severity_score: SeverityScore;
+  ward?: string;
 }
 
 export interface CreateReportResponse {

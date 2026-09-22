@@ -2,8 +2,10 @@ import React, { useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  FlatList,
   Image,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   ScrollView,
   StatusBar,
@@ -54,12 +56,24 @@ const CATEGORIES: Array<{
   },
 ];
 
+const NAGPUR_LOCATIONS = [
+  { name: 'Indora Chowk / Kamptee Road', lat: 21.1730, lng: 79.1025, ward: 'Ward 3 (Kamptee Road)' },
+  { name: 'Katol Road / Gittikhadan', lat: 21.1624, lng: 79.0558, ward: 'Ward 2 (Katol Road)' },
+  { name: 'West High Court Road / Dharampeth', lat: 21.1352, lng: 79.0621, ward: 'Ward 9 (Dharampeth)' },
+  { name: 'Manish Nagar T-Point', lat: 21.1065, lng: 79.0812, ward: 'Ward 14 (Manish Nagar)' },
+  { name: 'Sitabuldi Metro Interchange', lat: 21.1458, lng: 79.0882, ward: 'Ward 8 (Sitabuldi)' },
+  { name: 'Medical Square / Ajni', lat: 21.1275, lng: 79.0970, ward: 'Ward 11 (Ajni/Medical)' },
+  { name: 'Wardha Road / Airport Metro', lat: 21.0890, lng: 79.0650, ward: 'Ward 15 (Somalwada)' },
+  { name: 'Sadar Residency Road', lat: 21.1610, lng: 79.0820, ward: 'Ward 1 (Mangalwari/Sadar)' },
+];
+
 export default function ConfirmComplaintScreen() {
   const router = useRouter();
-  const { draft, setDraftCategory, setDraftDescription, resetDraft } = useAppStore();
+  const { draft, setDraftCategory, setDraftDescription, setDraftLocation, resetDraft } = useAppStore();
 
   const [description, setDescription] = useState(draft.description);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [showLocationPicker, setShowLocationPicker] = useState(false);
 
   // Duplicate Check Modal State
   const [duplicateCandidate, setDuplicateCandidate] = useState<DuplicateCandidate | null>(null);
@@ -86,6 +100,7 @@ export default function ConfirmComplaintScreen() {
         lng: draft.location.longitude,
         description: description.trim() || undefined,
         severity_score: draft.severityScore,
+        ward: draft.location.address,
       });
 
       // Step 2: Check if duplicate candidates were returned (PRD §5.1 step 5)
@@ -175,6 +190,24 @@ export default function ConfirmComplaintScreen() {
             </View>
           </View>
 
+          {/* 🎯 YOLO Detection Confirmed Banner */}
+          <View style={styles.detectionConfirmedCard}>
+            <View style={styles.detectionIconBox}>
+              <Ionicons name="scan" size={24} color="#EA580C" />
+            </View>
+            <View style={{ flex: 1 }}>
+              <View style={styles.detectionTitleRow}>
+                <Text style={styles.detectionConfirmedTitle}>YOLO Detection Confirmed</Text>
+                <View style={styles.confPill}>
+                  <Text style={styles.confPillText}>{Math.round(draft.confidence * 100)}% Conf</Text>
+                </View>
+              </View>
+              <Text style={styles.detectionConfirmedSub}>
+                Pothole identified & locked with bounding box coordinates.
+              </Text>
+            </View>
+          </View>
+
           {/* AI Severity & Risk Evaluation Box */}
           <View style={styles.severityCard}>
             <View style={styles.severityHeaderRow}>
@@ -241,9 +274,19 @@ export default function ConfirmComplaintScreen() {
             </View>
           </View>
 
-          {/* Location Details Card */}
+          {/* Location Details Card with Manual Selection */}
           <View style={styles.formSection}>
-            <Text style={styles.sectionLabel}>GEOLOCATION (NAGPUR GPS)</Text>
+            <View style={styles.locationHeaderRow}>
+              <Text style={styles.sectionLabel}>GEOLOCATION (NAGPUR GPS)</Text>
+              <TouchableOpacity
+                style={styles.manualLocationBtn}
+                onPress={() => setShowLocationPicker(true)}
+              >
+                <Ionicons name="map" size={12} color="#0284C7" />
+                <Text style={styles.manualLocationBtnText}>Select Manually</Text>
+              </TouchableOpacity>
+            </View>
+
             <View style={styles.locationCard}>
               <View style={styles.locationIconCircle}>
                 <Ionicons name="navigate-circle" size={24} color="#0284C7" />
@@ -296,6 +339,63 @@ export default function ConfirmComplaintScreen() {
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
+
+      {/* Manual Nagpur Location Picker Modal */}
+      <Modal
+        visible={showLocationPicker}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={() => setShowLocationPicker(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.locationSheet}>
+            <View style={styles.dragHandle} />
+            <View style={styles.locationSheetHeader}>
+              <View>
+                <Text style={styles.locationSheetTitle}>Select Nagpur Road / Zone</Text>
+                <Text style={styles.locationSheetSub}>
+                  Select corridor to route complaint directly to NMC ward engineer
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={styles.sheetCloseBtn}
+                onPress={() => setShowLocationPicker(false)}
+              >
+                <Ionicons name="close" size={20} color="#0F172A" />
+              </TouchableOpacity>
+            </View>
+
+            <FlatList
+              data={NAGPUR_LOCATIONS}
+              keyExtractor={(item) => item.name}
+              contentContainerStyle={{ paddingBottom: 20 }}
+              renderItem={({ item }) => (
+                <TouchableOpacity
+                  style={styles.locationOptionItem}
+                  onPress={() => {
+                    setDraftLocation({
+                      latitude: item.lat,
+                      longitude: item.lng,
+                      address: `${item.name} (${item.ward})`,
+                    });
+                    setShowLocationPicker(false);
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <View style={styles.locOptionIconBox}>
+                    <Ionicons name="location-sharp" size={18} color="#EA580C" />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.locOptionName}>{item.name}</Text>
+                    <Text style={styles.locOptionWard}>{item.ward}</Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={16} color="#CBD5E1" />
+                </TouchableOpacity>
+              )}
+            />
+          </View>
+        </View>
+      </Modal>
 
       {/* Duplicate Confirmation Sheet Modal */}
       <DuplicateConfirmSheet
@@ -538,5 +638,144 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 15,
     fontWeight: '800',
+  },
+  detectionConfirmedCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFF7ED',
+    borderWidth: 1.5,
+    borderColor: '#FDBA74',
+    borderRadius: 14,
+    padding: 12,
+    marginBottom: 16,
+    gap: 12,
+  },
+  detectionIconBox: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: '#FFEDD5',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  detectionTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 2,
+  },
+  detectionConfirmedTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#9A3412',
+  },
+  confPill: {
+    backgroundColor: '#EA580C',
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 10,
+  },
+  confPillText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  detectionConfirmedSub: {
+    fontSize: 11,
+    color: '#C2410C',
+    lineHeight: 15,
+  },
+  locationHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  manualLocationBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#E0F2FE',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 12,
+    gap: 4,
+  },
+  manualLocationBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#0284C7',
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    justifyContent: 'flex-end',
+  },
+  locationSheet: {
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    paddingBottom: 32,
+    maxHeight: '75%',
+  },
+  dragHandle: {
+    width: 40,
+    height: 4,
+    backgroundColor: '#CBD5E1',
+    borderRadius: 2,
+    alignSelf: 'center',
+    marginBottom: 14,
+  },
+  locationSheetHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 6,
+  },
+  locationSheetTitle: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: '#0F172A',
+  },
+  locationSheetSub: {
+    fontSize: 12,
+    color: '#64748B',
+    marginBottom: 14,
+  },
+  sheetCloseBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#F1F5F9',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  locationOptionItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+    gap: 12,
+  },
+  locOptionIconBox: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#FFF7ED',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  locOptionName: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  locOptionWard: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 1,
   },
 });

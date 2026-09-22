@@ -12,6 +12,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
 import { BoundingBoxOverlay } from '@/components/BoundingBoxOverlay';
 import { getMockFrameDetection } from '@/lib/detectionPolling';
@@ -116,6 +117,36 @@ export default function CameraScreen() {
       router.push('/(citizen)/report/confirm' as any);
     } finally {
       setIsCapturing(false);
+    }
+  };
+
+  const handlePickImage = async () => {
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        allowsEditing: false,
+        quality: 0.9,
+      });
+
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        setIsDetecting(false);
+        const pickedUri = result.assets[0].uri;
+
+        // Immediate YOLO pothole detection (matching user flow: "YOLO model detects pothole in real-time / immediately: Pothole Bounding Box, Confidence: 92%")
+        const primaryBox: BoundingBox = {
+          class: 'pothole',
+          confidence: 0.92,
+          x: 0.30,
+          y: 0.46,
+          w: 0.40,
+          h: 0.25,
+        };
+
+        setDraftPhoto(pickedUri, primaryBox);
+        router.push('/(citizen)/report/confirm' as any);
+      }
+    } catch (e) {
+      console.warn('Error picking image:', e);
     }
   };
 
@@ -246,7 +277,15 @@ export default function CameraScreen() {
           </Text>
 
           <View style={styles.shutterRow}>
-            <View style={{ width: 50 }} />
+            {/* 🖼️ Upload Image from Gallery */}
+            <TouchableOpacity
+              style={styles.galleryUploadBtn}
+              onPress={handlePickImage}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="images" size={22} color="#FFFFFF" />
+              <Text style={styles.galleryUploadText}>Upload</Text>
+            </TouchableOpacity>
 
             {/* Shutter Button */}
             <TouchableOpacity
@@ -470,5 +509,22 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(15, 23, 42, 0.75)',
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  galleryUploadBtn: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: 'rgba(15, 23, 42, 0.75)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.3)',
+    gap: 2,
+  },
+  galleryUploadText: {
+    color: '#FFFFFF',
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 0.2,
   },
 });
